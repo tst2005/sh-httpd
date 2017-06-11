@@ -67,7 +67,7 @@ if  [ $# -eq 0 ]; then
 	body_dump() { cat -- "$TMPFILE"; }
 	body_len() { stat -c '%s' "$TMPFILE"; }
 	body_drop() { > "$TMPFILE"; }
-	file_len() { stat -L -c '%s' "$TMPFILE"; }
+	#file_len() { stat -L -c '%s' "$TMPFILE"; }
 
 	# Usage: http_body_reply "any value"
 	http_body_reply() { printf -- '%s\n' "$@"; }
@@ -82,93 +82,98 @@ if  [ $# -eq 0 ]; then
 		# 127.0.0.1 - - [01/Jan/2017:12:34:56 +0200] "GET /path/to/file HTTP/1.0" 200 2267 "-" "Useragent"
 		echo >&2 "[$(date +%H:%M:%S)] $1: \"$firstline\" $_out_resp_status $_out_resp_length \"-\" content-type=$_out_resp_content_type"
 	}
+	error_log() {
+		echo >&2 "[$(date +%H:%M:%S)] ERR: $1"
+	}
 
 	#########
 
-	_echo() { printf -- '%s' "$1"; }
+	_echo() { printf -- '%s'"$2" "$1"; }
 	noeol() { printf -- '%s' "$1" | tr -d '\r\n'; }
 
+	handler_403() {
+		#set_http_version 'HTTP/1.0'
+		set_status_code '403' 'Forbidden'
+		access_log "deny" #HEAD/GET
+		head_request_stop_here
 
-	read -r firstline
-	firstline="$(noeol     "$firstline")"
-	_method="$(_echo	"$firstline" | cut -d\  -f1)"
-	_path="$(_echo		"$firstline" | cut -d\  -f2)"
-	_httpvers="$(_echo	"$firstline" | cut -d\  -f3)"
-	_empty="$(_echo		"$firstline" | cut -d\  -f4-)"
+		set_content_type 'text/plain; charset=utf-8'
+		#set_content_type 'text/html; charset=utf-8'
+		http_header_reply 'Connection: closed'
+		http_header_reply_send
+		http_body_reply "HACK FAILED"
+	}
 
-	case "$_method" in
-		(HEAD) ;;
-		(GET) ;;
-		(*)
-			echo >&2 "Unauthorized metho $_method"
-			exit 0
-		;;
+	autoindex() {
+		local absdir="$1";	# real absolute path = abs base + subpath
+		local _path="$2";	# web base dir
+		#_path="$(_echo "$_path" | sed -e 's,^/\+,,g')"
+		local cdir="$(basename "$_path")"
+		cdir="${cdir%/}"
+
+_echo '<!DOCTYPE html>' '\n'
+_echo '<html>' '\n'
+_echo ' <head>' '\n'
+_echo '  <title>Index of '"$_path"'</title>' '\n'
+_echo ' </head>' '\n'
+_echo ' <body>' '\n'
+_echo '<h1>Index of '"$_path"'</h1>' '\n'
+_echo '  <table>' '\n'
+_echo '   <tr><th valign="top"><img src="/icons/blank.gif" alt="[ICO]"></th><th>Name</th><th>Last modified</th><th>Size</th></tr>' '\n'
+_echo '   <tr><th colspan="4"><hr></th></tr>' '\n'
+		_echo '<tr><td valign="top"><img src="/icons/unknown.gif" alt="[   ]"></td><td><a href="'\
+".."\
+'">Parent Directory</a></td><td>&nbsp;</td><td align="right">  - </td></tr>' '\n'
+		(
+			cd -- "$absdir" && \
+			for f in *; do
+				_echo '<tr><td valign="top"><img src="/icons/image2.gif" alt="[IMG]"></td><td><a href="'\
+"${cdir:+$cdir/}$f"\
+'">'\
+"$f"\
+'</a></td><td align="right">2008-04-19 19:13  </td><td align="right">'\
+123K\
+'</td></tr>' '\n'
+			done
+		)
+_echo '   <tr><th colspan="4"><hr></th></tr>' '\n'
+_echo '</table>' '\n'
+_echo '</body></html>' '\n'
+	}
+	handler_dir() {
+		local _path="$1"
+		#### Directory index ####
+		set_http_version 'HTTP/1.0'
+		set_status_code '200' 'OK'
+		access_log "dir" #HEAD
+		head_request_stop_here
+
+		#http_header_reply "Location: 
+
+		body_drop
+		#body_add "content of directory $_path ($abspath):" '\n'
+		autoindex "$abspath" "$_path"| body_fromfile -
+
+		set_content_type 'text/html; charset=utf-8'
+		set_length $(body_len)
+		access_log "dir" #GET
+		http_header_reply_send
+		body_dump
+		body_drop
+	}
+command -v mimetype >/dev/null 2>&1 || mimetype() {
+	local ext="${1%%*.}"
+	case "$ext" in
+		md) 		_echo 'text/markdown' ;;
+		htm|html) 	_echo 'text/html' ;;
+		js)		_echo 'application/javascript' ;;
+		json)		_echo 'application/json' ;;
+		css)		_echo 'text/css' ;;
+		*)	:
 	esac
-	case "$_httpvers" in
-		('HTTP/1.0'|'HTTP/1.1') ;;
-		(*)
-			echo >&2 "HTTP Version not supported:"
-			printf -- '%s\n' "$_httpvers" | tr -d '\r' >&2
-			exit 0
-		;;
-	esac
-	if [ -n "$_empty" ]; then
-		echo >&2 "Invalid request ($_empty)"
-		exit 0
-	fi
-
-	abspath="$(readlink -f "$ROOTDIR/$_path")"
-	case "$abspath" in
-		("$ROOTDIR"|"$ROOTDIR"/*) ;;
-		(*)
-			#set_http_version 'HTTP/1.0'
-			set_status_code '403' 'Forbidden'
-			access_log "deny" #HEAD/GET
-			head_request_stop_here
-
-			set_content_type 'text/plain; charset=utf-8'
-			#set_content_type 'text/html; charset=utf-8'
-			http_header_reply 'Connection: closed'
-			http_header_reply_send
-			http_body_reply "HACK FAILED"
-			exit 0
-		;;
-	esac
-	#echo >&2 "check requested path: is $abspath inside $ROOTDIR ?"
-
-	# read all the http headers
-	while read -r line; do
-		case "$(printf -- '%s' "$line" | tr -d '\r\n')" in
-			("") break ;;
-			(*) echo >&2 "#get# $line"
-		esac
-	done
-
-	if [ -e "$abspath" ]; then
-		if [ -d "$abspath" ]; then
-			#### Directory index ####
-			set_http_version 'HTTP/1.0'
-			set_status_code '200' 'OK'
-			access_log "dir" #HEAD
-			head_request_stop_here
-
-			autoindex() { ls -1 -- "$1"; }
-
-			body_drop
-			body_add "content of directory $_path ($abspath):" '\n'
-			autoindex "$abspath" | body_fromfile -
-
-			set_content_type 'text/html; charset=utf-8'
-			#set_content_type "$(auto_content_type "$TMPFILE")"
-			set_length $(body_len)
-			access_log "dir" #GET
-			http_header_reply_send
-			body_dump
-			body_drop
-			exit 0
-		fi
-		##### File exists ####
-
+}
+		
+	handler_file() {
 		#< HTTP/1.1 200 OK
 		set_http_version 'HTTP/1.1'
 		set_status_code '200' 'OK'
@@ -203,16 +208,78 @@ if  [ $# -eq 0 ]; then
 		http_header_reply_send
 		body_dump
 		body_drop
+	}
+	handler_404() {
+		#set_http_version 'HTTP/1.0'
+		set_status_code '404' 'Not Found'
+		access_log "404" #HEAD/GET
+		head_request_stop_here
+
+		set_content_type 'text/html; charset=utf-8'
+		http_header_reply_send
+		body_drop
+		body_add "Page Not Found" '\r\n'
+		body_dump
+		body_drop
+	}
+
+	read -r firstline
+	firstline="$(noeol     "$firstline")"
+	_method="$(_echo	"$firstline" | cut -d\  -f1)"
+	_path="$(_echo		"$firstline" | cut -d\  -f2)"
+	_httpvers="$(_echo	"$firstline" | cut -d\  -f3)"
+	_empty="$(_echo		"$firstline" | cut -d\  -f4-)"
+
+	case "$_method" in
+		(HEAD) ;;
+		(GET) ;;
+		(*)
+			error_log "Unauthorized method $_method"
+			exit 0
+		;;
+	esac
+	case "$_httpvers" in
+		('HTTP/1.0'|'HTTP/1.1') ;;
+		(*)
+			error_log "HTTP Version not supported:"
+			printf -- '%s\n' "$_httpvers" | tr -d '\r' >&2
+			exit 0
+		;;
+	esac
+	if [ -n "$_empty" ]; then
+		error_log "Invalid request ($_empty)"
+		exit 0
+	fi
+
+	abspath="$(readlink -f "$ROOTDIR/$_path")"
+	case "$abspath" in
+		("$ROOTDIR"|"$ROOTDIR"/*) ;;
+		(*)
+			handler_403
+			exit 0
+		;;
+	esac
+	#echo >&2 "check requested path: is $abspath inside $ROOTDIR ?"
+
+	# read all the http headers
+	while read -r line; do
+		case "$(printf -- '%s' "$line" | tr -d '\r\n')" in
+			("") break ;;
+			(*) echo >&2 "#get# $line"
+		esac
+	done
+
+	if [ -e "$abspath" ]; then
+		if [ -d "$abspath" ]; then
+			handler_dir "$_path"
+			exit 0
+		fi
+		##### File exists ####
+		handler_file
 		exit 0
 	fi
 	#### Page not found ####
-	#set_http_version 'HTTP/1.0'
-	set_status_code '404' 'Not Found'
-	access_log "404" #HEAD/GET
-	head_request_stop_here
-
-	set_content_type 'text/html; charset=utf-8'
-	http_header_reply_send
+	handler_404
 	exit 0
 fi
 set +x
@@ -228,7 +295,8 @@ case "$1" in
 			exit 2
 		fi
 		echo "$$" > "$LOCKFILE"
-		trap -- "rm -f -- '$LOCKFILE' '$TMPFILE'" EXIT
+		trap -- "rm -f -- $(readlink -f "$LOCKFILE") $TMPFILE" EXIT INT
+		echo traping $(readlink -f "$LOCKFILE") $TMPFILE
 
 		rootdir=''
 		host=''
@@ -259,19 +327,19 @@ case "$1" in
 #		fi
 
 		[ -n "$host" ] || host='127.0.0.1'
-		[ -n "$port" ] || port=80
+		[ -n "$port" ] || port=8080
 		rootdir="$(readlink -f "$rootdir")"
 
 		echo "# rootdir=$rootdir"
 		echo "# at http://$host:$port/"
 		echo "Started"
-		set +e
+		#set +e
 		while true; do
 			#env -i - ROOTDIR="$(rootdir)" HTTPCHILD=true nc -l -p 1500 -e "$0" || break
 			nc -l ${host:+-s "$host"} -p $port -c "/usr/bin/env -i - ROOTDIR='$rootdir' TMPFILE='$TMPFILE' HTTPCHILD=true PATH='$PATH' '$0'"
 			[ $? -eq 1 ] && break || true
 		done
-		set -e
+		#set -e
 	;;
 	(status)
 		shift;
