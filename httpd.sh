@@ -72,6 +72,24 @@ if  [ $# -eq 0 ]; then
 	# Usage: http_body_reply "any value"
 	http_body_reply() { printf -- '%s\n' "$@"; }
 
+	_du_h() {
+		local s;s="$(stat -c %s -- "$1")";
+		local n=-1
+		local unit=''
+		for n in 0 1 2 3 4; do
+			[ $(( $s / 1024 )) -gt 0 ]] || break;
+			s=$(( $s / 1024 ))
+		done
+		case "$n" in
+			0) ;;
+			1) unit=K;;
+			2) unit=M;;
+			3) unit=G;;
+			*) unit=T;;
+		esac
+		printf '%s%s\n' "$s" "$unit"
+	}
+
 	auto_content_type() {
 		local charset="$(file -k -L -b --mime-encoding "$1")"
 		[ "$charset" != "us-ascii" ] || charset=''
@@ -80,7 +98,7 @@ if  [ $# -eq 0 ]; then
 	access_log() {
 		# apache log sample:
 		# 127.0.0.1 - - [01/Jan/2017:12:34:56 +0200] "GET /path/to/file HTTP/1.0" 200 2267 "-" "Useragent"
-		echo >&2 "[$(date +%H:%M:%S)] $1: \"$firstline\" $_out_resp_status $_out_resp_length \"-\" content-type=$_out_resp_content_type"
+		echo >&2 "[$(date +%H:%M:%S)] $1: \"$firstline\" ${_out_resp_status} ${_out_resp_length:--} \"-\" \"$useragent\" content-type=$_out_resp_content_type"
 	}
 	error_log() {
 		echo >&2 "[$(date +%H:%M:%S)] ERR: $1"
@@ -111,16 +129,16 @@ if  [ $# -eq 0 ]; then
 		local cdir="$(basename "$_path")"
 		cdir="${cdir%/}"
 
-_echo '<!DOCTYPE html>' '\n'
-_echo '<html>' '\n'
-_echo ' <head>' '\n'
-_echo '  <title>Index of '"$_path"'</title>' '\n'
-_echo ' </head>' '\n'
-_echo ' <body>' '\n'
-_echo '<h1>Index of '"$_path"'</h1>' '\n'
-_echo '  <table>' '\n'
-_echo '   <tr><th valign="top"><img src="/icons/blank.gif" alt="[ICO]"></th><th>Name</th><th>Last modified</th><th>Size</th></tr>' '\n'
-_echo '   <tr><th colspan="4"><hr></th></tr>' '\n'
+		_echo '<!DOCTYPE html>' '\n'
+		_echo '<html>' '\n'
+		_echo ' <head>' '\n'
+		_echo '  <title>Index of '"$_path"'</title>' '\n'
+		_echo ' </head>' '\n'
+		_echo ' <body>' '\n'
+		_echo '<h1>Index of '"$_path"'</h1>' '\n'
+		_echo '  <table>' '\n'
+		_echo '   <tr><th valign="top"><img src="/icons/blank.gif" alt="[ICO]"></th><th>Name</th><th>Last modified</th><th>Size</th></tr>' '\n'
+		_echo '   <tr><th colspan="4"><hr></th></tr>' '\n'
 		_echo '<tr><td valign="top"><img src="/icons/unknown.gif" alt="[   ]"></td><td><a href="'\
 ".."\
 '">Parent Directory</a></td><td>&nbsp;</td><td align="right">  - </td></tr>' '\n'
@@ -131,14 +149,16 @@ _echo '   <tr><th colspan="4"><hr></th></tr>' '\n'
 "${cdir:+$cdir/}$f"\
 '">'\
 "$f"\
-'</a></td><td align="right">2008-04-19 19:13  </td><td align="right">'\
-123K\
+'</a></td><td align="right">'\
+"$(date -d "@$(stat -c '%Y' "$f")" +'%Y-%m-%d %H:%M')"\
+'</td><td align="right">'\
+"$(_du_h "$f")"\
 '</td></tr>' '\n'
 			done
 		)
-_echo '   <tr><th colspan="4"><hr></th></tr>' '\n'
-_echo '</table>' '\n'
-_echo '</body></html>' '\n'
+		_echo '   <tr><th colspan="4"><hr></th></tr>' '\n'
+		_echo '</table>' '\n'
+		_echo '</body></html>' '\n'
 	}
 	handler_dir() {
 		local _path="$1"
@@ -161,17 +181,18 @@ _echo '</body></html>' '\n'
 		body_dump
 		body_drop
 	}
-command -v mimetype >/dev/null 2>&1 || mimetype() {
-	local ext="${1%%*.}"
-	case "$ext" in
-		md) 		_echo 'text/markdown' ;;
-		htm|html) 	_echo 'text/html' ;;
-		js)		_echo 'application/javascript' ;;
-		json)		_echo 'application/json' ;;
-		css)		_echo 'text/css' ;;
-		*)	:
-	esac
-}
+
+	command -v mimetype >/dev/null 2>&1 || mimetype() {
+		shift $(( $# -1 ))
+		case "$(basename "$1" | tr 'A-Z' 'a-z')" in
+			*.md) 		_echo 'text/markdown' ;;
+			*.htm|*.html) 	_echo 'text/html' ;;
+			*.js)		_echo 'application/javascript' ;;
+			*.json)		_echo 'application/json' ;;
+			*.css)		_echo 'text/css' ;;
+			*)		_echo 'application/octet-stream' ;;
+		esac
+	}
 		
 	handler_file() {
 		#< HTTP/1.1 200 OK
@@ -215,16 +236,18 @@ command -v mimetype >/dev/null 2>&1 || mimetype() {
 		access_log "404" #HEAD/GET
 		head_request_stop_here
 
-		set_content_type 'text/html; charset=utf-8'
-		http_header_reply_send
 		body_drop
 		body_add "Page Not Found" '\r\n'
+		set_length $(body_len)
+		set_content_type 'text/html; charset=utf-8'
+		http_header_reply_send
+
 		body_dump
 		body_drop
 	}
 
 	read -r firstline
-	firstline="$(noeol     "$firstline")"
+	firstline="$(noeol	"$firstline")"
 	_method="$(_echo	"$firstline" | cut -d\  -f1)"
 	_path="$(_echo		"$firstline" | cut -d\  -f2)"
 	_httpvers="$(_echo	"$firstline" | cut -d\  -f3)"
@@ -251,35 +274,39 @@ command -v mimetype >/dev/null 2>&1 || mimetype() {
 		exit 0
 	fi
 
-	abspath="$(readlink -f "$ROOTDIR/$_path")"
-	case "$abspath" in
-		("$ROOTDIR"|"$ROOTDIR"/*) ;;
-		(*)
-			handler_403
-			exit 0
-		;;
-	esac
-	#echo >&2 "check requested path: is $abspath inside $ROOTDIR ?"
-
 	# read all the http headers
 	while read -r line; do
-		case "$(printf -- '%s' "$line" | tr -d '\r\n')" in
+		line="$(printf -- '%s' "$line" | tr -d '\r\n')"
+		case "$(printf -- '%s' "$line" | tr 'A-Z' 'a-z')" in
 			("") break ;;
-			(*) echo >&2 "#get# $line"
+			("user-agent: "*) useragent="${line%*: }";
+				#echo >&2 "#get# useragent=$useragent"
+			;;
+			#(*) echo >&2 "#get# $line" ;;
 		esac
 	done
 
+	#local abspath
+	abspath="$ROOTDIR/$_path"
 	if [ -e "$abspath" ]; then
-		if [ -d "$abspath" ]; then
-			handler_dir "$_path"
-			exit 0
-		fi
-		##### File exists ####
-		handler_file
+		abspath="$(readlink -f "$abspath")"
+		case "$abspath" in
+			("$ROOTDIR"|"$ROOTDIR"/*) ;;
+			(*)
+				handler_403
+				exit 0
+			;;
+		esac
+	else
+		handler_404
 		exit 0
 	fi
-	#### Page not found ####
-	handler_404
+
+	if [ -d "$abspath" ]; then
+		handler_dir "$_path"
+	else
+		handler_file
+	fi
 	exit 0
 fi
 set +x
@@ -332,7 +359,7 @@ case "$1" in
 
 		echo "# rootdir=$rootdir"
 		echo "# at http://$host:$port/"
-		echo "Started"
+		echo "# Started"
 		#set +e
 		while true; do
 			#env -i - ROOTDIR="$(rootdir)" HTTPCHILD=true nc -l -p 1500 -e "$0" || break
@@ -358,7 +385,7 @@ case "$1" in
 			echo "Not running"
 		fi
 	;;
-	(help)
+	(help|*)
 		shift;
 		echo "Usage: $0 status|stop"
 		echo "Usage: $0 start [<rootdir>] [-p <port>] [-H <host>]"
